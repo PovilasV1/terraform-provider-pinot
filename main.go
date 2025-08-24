@@ -1,43 +1,29 @@
-// Copyright (c) HashiCorp, Inc.
-// SPDX-License-Identifier: MPL-2.0
-
+// main.go
 package main
 
 import (
-	"context"
-	"flag"
-	"log"
+    "context"
+    "flag"
+    "log"
 
-	"github.com/hashicorp/terraform-plugin-framework/providerserver"
-	"github.com/hashicorp/terraform-provider-scaffolding-framework/internal/provider"
+    "github.com/hashicorp/terraform-plugin-framework/providerserver"
+    "terraform-provider-pinot/internal/provider"
 )
 
-var (
-	// these will be set by the goreleaser configuration
-	// to appropriate values for the compiled binary.
-	version string = "dev"
-
-	// goreleaser can pass other information to the main package, such as the specific commit
-	// https://goreleaser.com/cookbooks/using-main.version/
-)
+var version = "dev"
 
 func main() {
-	var debug bool
+    var debug bool
+    flag.BoolVar(&debug, "debug", false, "set to true to run the provider with support for debuggers")
+    flag.Parse()
 
-	flag.BoolVar(&debug, "debug", false, "set to true to run the provider with support for debuggers like delve")
-	flag.Parse()
+    opts := providerserver.ServeOpts{
+        Address: "registry.terraform.io/apache/pinot",
+        Debug:   debug,
+    }
 
-	opts := providerserver.ServeOpts{
-		// TODO: Update this string with the published name of your provider.
-		// Also update the tfplugindocs generate command to either remove the
-		// -provider-name flag or set its value to the updated provider name.
-		Address: "registry.terraform.io/hashicorp/scaffolding",
-		Debug:   debug,
-	}
-
-	err := providerserver.Serve(context.Background(), provider.New(version), opts)
-
-	if err != nil {
-		log.Fatal(err.Error())
-	}
+    err := providerserver.Serve(context.Background(), provider.New(version), opts)
+    if err != nil {
+        log.Fatal(err.Error())
+    }
 }
