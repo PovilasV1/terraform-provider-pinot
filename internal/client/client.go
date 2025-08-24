@@ -90,24 +90,24 @@ func (c *PinotClient) GetSchema(ctx context.Context, schemaName string) (map[str
 }
 
 func (c *PinotClient) UpdateSchema(ctx context.Context, schema interface{}) error {
-    // Convert to map to extract schema name
-    jsonBytes, err := json.Marshal(schema)
-    if err != nil {
-        return fmt.Errorf("failed to marshal schema: %w", err)
-    }
+	// Convert to map to extract schema name
+	jsonBytes, err := json.Marshal(schema)
+	if err != nil {
+		return fmt.Errorf("failed to marshal schema: %w", err)
+	}
 
-    var schemaMap map[string]interface{}
-    if err := json.Unmarshal(jsonBytes, &schemaMap); err != nil {
-        return fmt.Errorf("failed to unmarshal schema: %w", err)
-    }
+	var schemaMap map[string]interface{}
+	if err := json.Unmarshal(jsonBytes, &schemaMap); err != nil {
+		return fmt.Errorf("failed to unmarshal schema: %w", err)
+	}
 
-    schemaName, ok := schemaMap["schemaName"].(string)
-    if !ok {
-        return fmt.Errorf("schema name not found")
-    }
+	schemaName, ok := schemaMap["schemaName"].(string)
+	if !ok {
+		return fmt.Errorf("schema name not found")
+	}
 
-    _, err = c.doRequest(ctx, "PUT", fmt.Sprintf("%s/schemas/%s", c.controllerURL, schemaName), schema)
-    return err
+	_, err = c.doRequest(ctx, "PUT", fmt.Sprintf("%s/schemas/%s", c.controllerURL, schemaName), schema)
+	return err
 }
 
 func (c *PinotClient) DeleteSchema(ctx context.Context, schemaName string) error {
@@ -122,49 +122,48 @@ func (c *PinotClient) CreateTable(ctx context.Context, tableConfig interface{}) 
 }
 
 func (c *PinotClient) GetTable(ctx context.Context, tableName string) (map[string]interface{}, error) {
-    resp, err := c.doRequest(ctx, "GET", fmt.Sprintf("%s/tables/%s", c.controllerURL, tableName), nil)
-    if err != nil {
-        return nil, err
-    }
+	resp, err := c.doRequest(ctx, "GET", fmt.Sprintf("%s/tables/%s", c.controllerURL, tableName), nil)
+	if err != nil {
+		return nil, err
+	}
 
-    var response map[string]interface{}
-    if err := json.Unmarshal(resp, &response); err != nil {
-        return nil, fmt.Errorf("failed to unmarshal table config: %w", err)
-    }
+	var response map[string]interface{}
+	if err := json.Unmarshal(resp, &response); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal table config: %w", err)
+	}
 
-    // Pinot returns the table config wrapped in a key like "OFFLINE" or "REALTIME"
-    // We need to extract the actual table configuration
-    if offlineConfig, ok := response["OFFLINE"].(map[string]interface{}); ok {
-        return offlineConfig, nil
-    }
-    if realtimeConfig, ok := response["REALTIME"].(map[string]interface{}); ok {
-        return realtimeConfig, nil
-    }
+	// Pinot returns the table config wrapped in a key like "OFFLINE" or "REALTIME"
+	// We need to extract the actual table configuration
+	if offlineConfig, ok := response["OFFLINE"].(map[string]interface{}); ok {
+		return offlineConfig, nil
+	}
+	if realtimeConfig, ok := response["REALTIME"].(map[string]interface{}); ok {
+		return realtimeConfig, nil
+	}
 
-    // If neither key exists, return the response as is (might be an error or different format)
-    return response, nil
+	// If neither key exists, return the response as is (might be an error or different format)
+	return response, nil
 }
 
-
 func (c *PinotClient) UpdateTable(ctx context.Context, tableConfig interface{}) error {
-    // Convert to map to extract table name
-    jsonBytes, err := json.Marshal(tableConfig)
-    if err != nil {
-        return fmt.Errorf("failed to marshal table config: %w", err)
-    }
+	// Convert to map to extract table name
+	jsonBytes, err := json.Marshal(tableConfig)
+	if err != nil {
+		return fmt.Errorf("failed to marshal table config: %w", err)
+	}
 
-    var tableMap map[string]interface{}
-    if err := json.Unmarshal(jsonBytes, &tableMap); err != nil {
-        return fmt.Errorf("failed to unmarshal table config: %w", err)
-    }
+	var tableMap map[string]interface{}
+	if err := json.Unmarshal(jsonBytes, &tableMap); err != nil {
+		return fmt.Errorf("failed to unmarshal table config: %w", err)
+	}
 
-    tableName, ok := tableMap["tableName"].(string)
-    if !ok {
-        return fmt.Errorf("table name not found")
-    }
+	tableName, ok := tableMap["tableName"].(string)
+	if !ok {
+		return fmt.Errorf("table name not found")
+	}
 
-    _, err = c.doRequest(ctx, "PUT", fmt.Sprintf("%s/tables/%s", c.controllerURL, tableName), tableConfig)
-    return err
+	_, err = c.doRequest(ctx, "PUT", fmt.Sprintf("%s/tables/%s", c.controllerURL, tableName), tableConfig)
+	return err
 }
 
 func (c *PinotClient) DeleteTable(ctx context.Context, tableName string) error {

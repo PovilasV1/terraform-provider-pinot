@@ -292,7 +292,9 @@ func joinTableID(logical, typ string) string {
 }
 
 // deleteTableByLogical performs:
-//   DELETE {PINOT_CONTROLLER_URL}/tables/{logical}?type={typ}
+//
+//	DELETE {PINOT_CONTROLLER_URL}/tables/{logical}?type={typ}
+//
 // It honors optional env vars for Database header and auth.
 func deleteTableByLogical(ctx context.Context, logical, typ string) error {
 	base := strings.TrimRight(os.Getenv("PINOT_CONTROLLER_URL"), "/")
