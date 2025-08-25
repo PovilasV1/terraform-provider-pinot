@@ -36,15 +36,8 @@ type TableResourceModel struct {
 	TableConfig jsontypes.Normalized `tfsdk:"table_config"`
 }
 
-// Pinot table configuration structures.
-type TableConfig struct {
-	TableName        string                 `json:"tableName"`
-	TableType        string                 `json:"tableType"`
-	SegmentsConfig   map[string]interface{} `json:"segmentsConfig"`
-	Tenants          map[string]string      `json:"tenants"`
-	TableIndexConfig map[string]interface{} `json:"tableIndexConfig"`
-	Metadata         map[string]interface{} `json:"metadata,omitempty"`
-}
+// Treat table config as a passthrough JSON object so we don't drop fields.
+type TableConfig = map[string]interface{}
 
 func NewTableResource() resource.Resource {
 	return &TableResource{}
@@ -115,7 +108,7 @@ func (r *TableResource) Create(ctx context.Context, req resource.CreateRequest, 
 		return
 	}
 
-	// Parse and validate the table configuration
+	// Do NOT decode into a struct — keep all fields.
 	var tableConfig TableConfig
 	diags := data.TableConfig.Unmarshal(&tableConfig)
 	resp.Diagnostics.Append(diags...)
@@ -123,18 +116,26 @@ func (r *TableResource) Create(ctx context.Context, req resource.CreateRequest, 
 		return
 	}
 
-	// Validate consistency between attributes and JSON
 	fullTableName := joinTableID(data.TableName.ValueString(), data.TableType.ValueString())
-	if tableConfig.TableName != fullTableName {
+
+	// Validate tableName and tableType in the provided JSON.
+	if tn, _ := tableConfig["tableName"].(string); tn != fullTableName {
 		resp.Diagnostics.AddError(
 			"Table Name Mismatch",
 			fmt.Sprintf("The table configuration name must be %s", fullTableName),
 		)
 		return
 	}
+	if tt, _ := tableConfig["tableType"].(string); !strings.EqualFold(tt, data.TableType.ValueString()) {
+		resp.Diagnostics.AddError(
+			"Table Type Mismatch",
+			fmt.Sprintf("The table configuration type must be %s", strings.ToUpper(data.TableType.ValueString())),
+		)
+		return
+	}
 
-	// Create table via API
-	if err := r.client.CreateTable(ctx, &tableConfig); err != nil {
+	// Create table via API (passthrough JSON).
+	if err := r.client.CreateTable(ctx, tableConfig); err != nil {
 		resp.Diagnostics.AddError(
 			"Error Creating Pinot Table",
 			"Could not create table, unexpected error: "+err.Error(),
@@ -142,9 +143,7 @@ func (r *TableResource) Create(ctx context.Context, req resource.CreateRequest, 
 		return
 	}
 
-	// ID is the fully suffixed name
 	data.ID = types.StringValue(fullTableName)
-
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
@@ -155,10 +154,10 @@ func (r *TableResource) Read(ctx context.Context, req resource.ReadRequest, resp
 		return
 	}
 
-	// Get table configuration from API by suffixed ID
+	// Get table configuration from API by suffixed ID.
 	tableConfig, err := r.client.GetTable(ctx, data.ID.ValueString())
 	if err != nil {
-		// If the server returns 404, drop state
+		// If the server returns 404, drop state.
 		if strings.Contains(err.Error(), "404") {
 			resp.State.RemoveResource(ctx)
 			return
@@ -170,7 +169,7 @@ func (r *TableResource) Read(ctx context.Context, req resource.ReadRequest, resp
 		return
 	}
 
-	// Normalize and store the table configuration JSON
+	// Normalize and store the table configuration JSON.
 	configJSON, err := json.Marshal(tableConfig)
 	if err != nil {
 		resp.Diagnostics.AddError(
@@ -191,7 +190,7 @@ func (r *TableResource) Update(ctx context.Context, req resource.UpdateRequest, 
 		return
 	}
 
-	// Parse the updated configuration
+	// Keep all fields from user JSON.
 	var tableConfig TableConfig
 	diags := data.TableConfig.Unmarshal(&tableConfig)
 	resp.Diagnostics.Append(diags...)
@@ -199,8 +198,25 @@ func (r *TableResource) Update(ctx context.Context, req resource.UpdateRequest, 
 		return
 	}
 
-	// Update table via API
-	if err := r.client.UpdateTable(ctx, &tableConfig); err != nil {
+	// Optional sanity validation.
+	fullTableName := joinTableID(data.TableName.ValueString(), data.TableType.ValueString())
+	if tn, _ := tableConfig["tableName"].(string); tn != "" && tn != fullTableName {
+		resp.Diagnostics.AddError(
+			"Table Name Mismatch",
+			fmt.Sprintf("The table configuration name must be %s", fullTableName),
+		)
+		return
+	}
+	if tt, _ := tableConfig["tableType"].(string); tt != "" && !strings.EqualFold(tt, data.TableType.ValueString()) {
+		resp.Diagnostics.AddError(
+			"Table Type Mismatch",
+			fmt.Sprintf("The table configuration type must be %s", strings.ToUpper(data.TableType.ValueString())),
+		)
+		return
+	}
+
+	// Update via API (passthrough JSON).
+	if err := r.client.UpdateTable(ctx, tableConfig); err != nil {
 		resp.Diagnostics.AddError(
 			"Error Updating Pinot Table",
 			"Could not update table, unexpected error: "+err.Error(),
@@ -218,7 +234,7 @@ func (r *TableResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 		return
 	}
 
-	// Prefer attributes; fall back to parsing ID if needed
+	// Prefer attributes; fall back to parsing ID if needed.
 	logical := strings.TrimSpace(data.TableName.ValueString())
 	typ := strings.ToUpper(strings.TrimSpace(data.TableType.ValueString()))
 	if logical == "" || typ == "" {
@@ -240,7 +256,7 @@ func (r *TableResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 
 	// Primary path: DELETE /tables/{logical}?type=OFFLINE|REALTIME
 	if err := deleteTableByLogical(ctx, logical, typ); err != nil {
-		// Fallback: try the legacy suffixed delete via client (if supported)
+		// Fallback: try legacy suffixed delete via client (if supported)
 		if fallbackErr := r.client.DeleteTable(ctx, joinTableID(logical, typ)); fallbackErr != nil {
 			resp.Diagnostics.AddError(
 				"Error Deleting Pinot Table",
@@ -323,8 +339,8 @@ func deleteTableByLogical(ctx context.Context, logical, typ string) error {
 	// Optional auth: basic or bearer
 	if token := strings.TrimSpace(os.Getenv("PINOT_TOKEN")); token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
-	} else if u, p := os.Getenv("PINOT_USERNAME"), os.Getenv("PINOT_PASSWORD"); u != "" || p != "" {
-		req.SetBasicAuth(u, p)
+	} else if uName, p := os.Getenv("PINOT_USERNAME"), os.Getenv("PINOT_PASSWORD"); uName != "" || p != "" {
+		req.SetBasicAuth(uName, p)
 	}
 
 	resp, err := http.DefaultClient.Do(req)
@@ -333,7 +349,7 @@ func deleteTableByLogical(ctx context.Context, logical, typ string) error {
 	}
 	defer resp.Body.Close()
 
-	// 200/202/204 means deleted; 404 means already gone; else error.
+	// 200/202/204 => deleted; 404 => already gone.
 	if resp.StatusCode == http.StatusOK ||
 		resp.StatusCode == http.StatusAccepted ||
 		resp.StatusCode == http.StatusNoContent ||

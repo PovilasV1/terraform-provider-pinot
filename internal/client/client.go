@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -19,6 +20,7 @@ type PinotClient struct {
 }
 
 func NewPinotClient(controllerURL, username, password string) (*PinotClient, error) {
+	controllerURL = strings.TrimRight(controllerURL, "/")
 	return &PinotClient{
 		controllerURL: controllerURL,
 		httpClient: &http.Client{
