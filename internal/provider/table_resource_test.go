@@ -116,6 +116,7 @@ resource "pinot_schema" "test" {
 resource "pinot_table" "test" {
   table_name = "%[1]s"
   table_type = "OFFLINE"
+  depends_on = [pinot_schema.test]
 
   table_config = jsonencode({
     tableName = "%[1]s_OFFLINE"
@@ -196,6 +197,7 @@ resource "pinot_schema" "test" {
 resource "pinot_table" "test" {
   table_name = "%[1]s"
   table_type = "REALTIME"
+  depends_on = [pinot_schema.test]
 
   table_config = jsonencode({
     tableName = "%[1]s_REALTIME"
