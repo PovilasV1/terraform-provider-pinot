@@ -87,7 +87,6 @@ resource "pinot_schema" "test" {
         name      = "userId"
         dataType  = "STRING"
         fieldType = "DIMENSION"
-        notNull   = false
       }
     ]
 
@@ -96,7 +95,6 @@ resource "pinot_schema" "test" {
         name      = "count"
         dataType  = "LONG"
         fieldType = "METRIC"
-        notNull   = false
       }
     ]
 
@@ -107,7 +105,6 @@ resource "pinot_schema" "test" {
         format      = "1:MILLISECONDS:EPOCH"
         granularity = "1:HOURS"
         fieldType   = "DATE_TIME"
-        notNull     = false
       }
     ]
   })
@@ -126,7 +123,6 @@ resource "pinot_table" "test" {
       minimizeDataMovement = false
       timeColumnName       = "timestamp"
       timeType             = "MILLISECONDS"
-      schemaName           = "%[1]s"
       replication          = "1"
     }
 
@@ -149,6 +145,7 @@ resource "pinot_table" "test" {
       optimizeDictionaryType                     = false
       rangeIndexVersion                          = 2
       loadMode                                   = "MMAP"
+	  skipSegmentPreprocess                      = false
     }
 
     metadata = {
@@ -207,7 +204,6 @@ resource "pinot_table" "test" {
       minimizeDataMovement = false
       timeColumnName       = "timestamp"
       timeType             = "MILLISECONDS"
-      schemaName           = "%[1]s"
       replication          = "1"
       replicasPerPartition = "1"
     }
@@ -231,6 +227,7 @@ resource "pinot_table" "test" {
       optimizeDictionaryType                     = false
       rangeIndexVersion                          = 2
       loadMode                                   = "MMAP"
+	  skipSegmentPreprocess                      = false
 
       streamConfigs = {
         "streamType"                           = "kafka"
