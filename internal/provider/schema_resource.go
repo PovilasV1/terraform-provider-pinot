@@ -29,7 +29,7 @@ type SchemaResourceModel struct {
 	Schema     jsontypes.Normalized `tfsdk:"schema"`
 }
 
-// Pinot schema JSON structure
+// Pinot schema JSON structure.
 type PinotSchema struct {
 	SchemaName            string         `json:"schemaName"`
 	EnableColumnBasedNull bool           `json:"enableColumnBasedNullHandling,omitempty"`

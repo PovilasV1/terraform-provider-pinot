@@ -69,7 +69,7 @@ func (c *PinotClient) doRequest(ctx context.Context, method, url string, body in
 	return respBody, nil
 }
 
-// Schema operations
+// Schema operations.
 func (c *PinotClient) CreateSchema(ctx context.Context, schema interface{}) error {
 	_, err := c.doRequest(ctx, "POST", fmt.Sprintf("%s/schemas", c.controllerURL), schema)
 	return err
@@ -115,7 +115,7 @@ func (c *PinotClient) DeleteSchema(ctx context.Context, schemaName string) error
 	return err
 }
 
-// Table operations
+// Table operations.
 func (c *PinotClient) CreateTable(ctx context.Context, tableConfig interface{}) error {
 	_, err := c.doRequest(ctx, "POST", fmt.Sprintf("%s/tables", c.controllerURL), tableConfig)
 	return err

@@ -36,7 +36,7 @@ type TableResourceModel struct {
 	TableConfig jsontypes.Normalized `tfsdk:"table_config"`
 }
 
-// Pinot table configuration structures
+// Pinot table configuration structures.
 type TableConfig struct {
 	TableName        string                 `json:"tableName"`
 	TableType        string                 `json:"tableType"`
