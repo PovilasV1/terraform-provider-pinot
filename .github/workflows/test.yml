@@ -57,8 +57,8 @@ jobs:
     name: Set up Docker Compose
     uses: docker/setup-compose-action@v1
     name: Start services
-    shell: bash
-    run: docker compose up -d
+    run: |
+      docker compose up -d
     name: Terraform Provider Acceptance Tests
     needs: build
     runs-on: ubuntu-latest
