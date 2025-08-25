@@ -54,6 +54,11 @@ jobs:
 
   # Run acceptance tests in a matrix with Terraform CLI versions
   test:
+    name: Set up Docker Compose
+    uses: docker/setup-compose-action@v1
+    name: Start services
+    shell: bash
+    run: docker compose up -d
     name: Terraform Provider Acceptance Tests
     needs: build
     runs-on: ubuntu-latest
@@ -81,5 +86,6 @@ jobs:
       - run: go mod download
       - env:
           TF_ACC: "1"
+          PINOT_CONTROLLER_URL: "http://localhost:9000"
         run: go test -v -cover ./internal/provider/
         timeout-minutes: 10
