@@ -224,6 +224,14 @@ func (r *TableResource) Update(ctx context.Context, req resource.UpdateRequest, 
 		return
 	}
 
+	// Always reload segments after a successful update.
+	if err := r.client.ReloadTable(ctx, data.TableName.ValueString(), data.TableType.ValueString()); err != nil {
+		resp.Diagnostics.AddWarning(
+			"Pinot Segment Reload Failed",
+			fmt.Sprintf("Updated table %s but segment reload failed: %v", joinTableID(data.TableName.ValueString(), data.TableType.ValueString()), err),
+		)
+	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
