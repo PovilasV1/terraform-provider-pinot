@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -170,5 +171,25 @@ func (c *PinotClient) UpdateTable(ctx context.Context, tableConfig interface{}) 
 
 func (c *PinotClient) DeleteTable(ctx context.Context, tableName string) error {
 	_, err := c.doRequest(ctx, "DELETE", fmt.Sprintf("%s/tables/%s", c.controllerURL, tableName), nil)
+	return err
+}
+
+func (c *PinotClient) ReloadTable(ctx context.Context, logicalName, tableType string) error {
+	var missing []string
+	if logicalName == "" {
+		missing = append(missing, "logicalName")
+	}
+	if tableType == "" {
+		missing = append(missing, "tableType")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("%s is required", strings.Join(missing, " and "))
+	}
+	u := fmt.Sprintf("%s/segments/%s/reload?type=%s",
+		c.controllerURL,
+		url.PathEscape(logicalName),
+		url.QueryEscape(strings.ToUpper(tableType)),
+	)
+	_, err := c.doRequest(ctx, "POST", u, nil)
 	return err
 }
