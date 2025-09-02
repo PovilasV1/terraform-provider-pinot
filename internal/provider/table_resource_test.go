@@ -16,6 +16,8 @@ import (
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 )
 
+const defaultTruncateLen = 256
+
 func TestAccPinotTable_basic(t *testing.T) {
 	rName := acctest.RandStringFromCharSet(10, acctest.CharSetAlphaNum)
 
@@ -263,11 +265,11 @@ func testAccCheckPinotTableExists(resourceName string) resource.TestCheckFunc {
 			return err
 		}
 		if status != http.StatusOK {
-			return fmt.Errorf("expected table to exist, GET status %d (body: %s)", status, truncate(body, 256))
+			return fmt.Errorf("expected table to exist, GET status %d (body: %s)", status, truncate(body))
 		}
 		// Basic sanity: the body should include the tableName.
 		if !strings.Contains(body, `"tableName"`) || !strings.Contains(body, rs.Primary.ID) {
-			return fmt.Errorf("unexpected GET body, could not confirm table exists: %s", truncate(body, 256))
+			return fmt.Errorf("unexpected GET body, could not confirm table exists: %s", truncate(body))
 		}
 		return nil
 	}
@@ -305,7 +307,7 @@ func testAccCheckPinotTableDestroy(s *terraform.State) error {
 			}
 
 			if time.Now().After(deadline) {
-				return fmt.Errorf("table still exists after destroy wait: %s (last status %d; body: %s)", rs.Primary.ID, status, truncate(body, 256))
+				return fmt.Errorf("table still exists after destroy wait: %s (last status %d; body: %s)", rs.Primary.ID, status, truncate(body))
 			}
 			time.Sleep(interval)
 		}
@@ -331,7 +333,7 @@ func pinotGetTableRaw(id string) (int, string, error) {
 		req.Header.Set("Database", db)
 	}
 	if token := strings.TrimSpace(os.Getenv("PINOT_TOKEN")); token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Authorization", "Basic "+token)
 	} else if u, p := os.Getenv("PINOT_USERNAME"), os.Getenv("PINOT_PASSWORD"); u != "" || p != "" {
 		req.SetBasicAuth(u, p)
 	}
@@ -371,9 +373,9 @@ func looksLikeTableExists(body string, wantID string) bool {
 	return strings.Contains(b, `"tableName"`) && strings.Contains(b, wantID)
 }
 
-func truncate(s string, n int) string {
-	if len(s) <= n {
+func truncate(s string) string {
+	if len(s) <= defaultTruncateLen {
 		return s
 	}
-	return s[:n] + "…"
+	return s[:defaultTruncateLen] + "…"
 }

@@ -19,4 +19,5 @@ Terraform provider for managing Apache Pinot resources
 
 - `controller_url` (String) URL of the Pinot Controller (e.g., http://localhost:9000)
 - `password` (String, Sensitive) Password for Pinot authentication
+- `token` (String, Sensitive) Authentication token for Pinot
 - `username` (String) Username for Pinot authentication

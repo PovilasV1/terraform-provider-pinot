@@ -346,7 +346,7 @@ func deleteTableByLogical(ctx context.Context, logical, typ string) error {
 
 	// Optional auth: basic or bearer
 	if token := strings.TrimSpace(os.Getenv("PINOT_TOKEN")); token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Authorization", "Basic "+token)
 	} else if uName, p := os.Getenv("PINOT_USERNAME"), os.Getenv("PINOT_PASSWORD"); uName != "" || p != "" {
 		req.SetBasicAuth(uName, p)
 	}
