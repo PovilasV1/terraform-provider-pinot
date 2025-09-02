@@ -24,6 +24,7 @@ type PinotProviderModel struct {
 	ControllerURL types.String `tfsdk:"controller_url"`
 	Username      types.String `tfsdk:"username"`
 	Password      types.String `tfsdk:"password"`
+	Token         types.String `tfsdk:"token"`
 }
 
 func New(version string) func() provider.Provider {
@@ -56,55 +57,65 @@ func (p *PinotProvider) Schema(ctx context.Context, req provider.SchemaRequest, 
 				Optional:    true,
 				Sensitive:   true,
 			},
+			"token": schema.StringAttribute{
+				Description: "Authentication token for Pinot",
+				Optional:    true,
+				Sensitive:   true,
+			},
 		},
 	}
 }
 
 func (p *PinotProvider) Configure(ctx context.Context, req provider.ConfigureRequest, resp *provider.ConfigureResponse) {
 	var config PinotProviderModel
-
 	resp.Diagnostics.Append(req.Config.Get(ctx, &config)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
 	controllerURL := os.Getenv("PINOT_CONTROLLER_URL")
-
-	if !config.ControllerURL.IsNull() {
+	if !config.ControllerURL.IsNull() && config.ControllerURL.ValueString() != "" {
 		controllerURL = config.ControllerURL.ValueString()
 	}
-
 	if controllerURL == "" {
 		resp.Diagnostics.AddAttributeError(
 			path.Root("controller_url"),
 			"Missing Pinot Controller URL",
-			"The provider cannot create the Pinot client as there is a missing or empty value for the Pinot controller URL. "+
-				"Set the controller_url value in the configuration or use the PINOT_CONTROLLER_URL environment variable.",
+			"Set controller_url or PINOT_CONTROLLER_URL.",
 		)
 	}
 
+	username := os.Getenv("PINOT_USERNAME")
+	password := os.Getenv("PINOT_PASSWORD")
+	token := os.Getenv("PINOT_TOKEN")
+	if !config.Username.IsNull() && config.Username.ValueString() != "" {
+		username = config.Username.ValueString()
+	}
+	if !config.Password.IsNull() && config.Password.ValueString() != "" {
+		password = config.Password.ValueString()
+	}
+	if !config.Token.IsNull() && config.Token.ValueString() != "" {
+		token = config.Token.ValueString()
+	}
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
-	client, err := client.NewPinotClient(controllerURL,
-		config.Username.ValueString(), config.Password.ValueString())
+	// Always use token-aware constructor; token wins if present
+	c, err := client.NewPinotClientWithToken(controllerURL, username, password, token)
 	if err != nil {
-		resp.Diagnostics.AddError(
-			"Unable to Create Pinot Client",
-			"An unexpected error occurred when creating the Pinot client. "+
-				"Error: "+err.Error(),
-		)
+		resp.Diagnostics.AddError("Unable to Create Pinot Client", err.Error())
 		return
 	}
-	resp.DataSourceData = client
-	resp.ResourceData = client
+	resp.DataSourceData = c
+	resp.ResourceData = c
 }
 
 func (p *PinotProvider) Resources(ctx context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
 		NewSchemaResource,
 		NewTableResource,
+		NewUserResource,
 	}
 }
 

@@ -17,10 +17,10 @@ Manages a Pinot table (OFFLINE or REALTIME)
 
 ### Required
 
-- `table_config` (String) JSON configuration of the Pinot table
-- `table_name` (String) Name of the Pinot table
-- `table_type` (String) Type of table: OFFLINE or REALTIME
+- `table_config` (String) JSON configuration of the Pinot table. Prefer `jsonencode({...})` for stability.
+- `table_name` (String) Logical table name without suffix (e.g., `user_events`).
+- `table_type` (String) Type of table: `OFFLINE` or `REALTIME`.
 
 ### Read-Only
 
-- `id` (String) Table identifier
+- `id` (String) Table identifier `<logical>_<TYPE>` (e.g., `user_events_OFFLINE`).

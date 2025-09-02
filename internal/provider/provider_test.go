@@ -16,9 +16,12 @@ var testAccProtoV6ProviderFactories = map[string]func() (tfprotov6.ProviderServe
 
 func testAccPreCheck(t *testing.T) {
 	t.Helper()
-	if v := os.Getenv("PINOT_CONTROLLER_URL"); v == "" {
-		t.Fatal("PINOT_CONTROLLER_URL must be set, e.g. http://localhost:9000")
+	if os.Getenv("PINOT_CONTROLLER_URL") == "" {
+		t.Fatal("PINOT_CONTROLLER_URL must be set for acceptance tests")
 	}
-	// Optionally enforce auth/database if your provider needs them:
-	// if os.Getenv("PINOT_USERNAME") == "" || os.Getenv("PINOT_PASSWORD") == "" { t.Fatal("...") }
+	if os.Getenv("PINOT_USERNAME") == "" || os.Getenv("PINOT_PASSWORD") == "" {
+		if os.Getenv("PINOT_TOKEN") == "" {
+			t.Skip("set PINOT_USERNAME and PINOT_PASSWORD or PINOT_TOKEN for acceptance tests")
+		}
+	}
 }
