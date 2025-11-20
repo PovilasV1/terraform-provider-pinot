@@ -30,10 +30,13 @@ type TableResource struct {
 }
 
 type TableResourceModel struct {
-	ID          types.String         `tfsdk:"id"`
-	TableName   types.String         `tfsdk:"table_name"`
-	TableType   types.String         `tfsdk:"table_type"`
-	TableConfig jsontypes.Normalized `tfsdk:"table_config"`
+	ID             types.String         `tfsdk:"id"`
+	TableName      types.String         `tfsdk:"table_name"`
+	TableType      types.String         `tfsdk:"table_type"`
+	TableConfig    jsontypes.Normalized `tfsdk:"table_config"`
+	KafkaUsername  types.String         `tfsdk:"kafka_username"`
+	KafkaPassword  types.String         `tfsdk:"kafka_password"`
+	SaslJaasConfig types.String         `tfsdk:"sasl_jaas_config"`
 }
 
 // Treat table config as a passthrough JSON object so we don't drop fields.
@@ -79,6 +82,20 @@ func (r *TableResource) Schema(ctx context.Context, req resource.SchemaRequest, 
 				Required:            true,
 				MarkdownDescription: "JSON configuration of the Pinot table. Prefer `jsonencode({...})` for stability.",
 				CustomType:          jsontypes.NormalizedType{},
+			},
+			"kafka_username": schema.StringAttribute{
+				Optional:            true,
+				MarkdownDescription: "Optional Kafka username to inject into ingestionConfig.streamIngestionConfig.streamConfigMaps.sasl.jaas.config.",
+			},
+			"kafka_password": schema.StringAttribute{
+				Optional:            true,
+				Sensitive:           true,
+				MarkdownDescription: "Optional Kafka password to inject into ingestionConfig.streamIngestionConfig.streamConfigMaps.sasl.jaas.config. Treated as sensitive.",
+			},
+			"sasl_jaas_config": schema.StringAttribute{
+				Computed:            true,
+				Sensitive:           true,
+				MarkdownDescription: "Computed sensitive value containing the injected sasl.jaas.config when kafka_username and kafka_password are provided.",
 			},
 		},
 	}
@@ -134,6 +151,15 @@ func (r *TableResource) Create(ctx context.Context, req resource.CreateRequest, 
 		return
 	}
 
+	saslValue, err := buildSaslIfProvided(&data)
+	if err != nil {
+		resp.Diagnostics.AddError("Kafka Credentials Incomplete", err.Error())
+		return
+	}
+	if saslValue != "" {
+		injectKafkaSasl(&tableConfig, saslValue)
+	}
+
 	// Create table via API (passthrough JSON).
 	if err := r.client.CreateTable(ctx, tableConfig); err != nil {
 		resp.Diagnostics.AddError(
@@ -143,7 +169,26 @@ func (r *TableResource) Create(ctx context.Context, req resource.CreateRequest, 
 		return
 	}
 
+	// For state: remove any sasl.jaas.config from the table_config JSON (we store it in a top-level sensitive attr instead).
+	cleanForState := removeSaslJaasFromTableConfig(tableConfig)
+	configJSON, err := json.Marshal(cleanForState)
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Error Marshaling Table Config",
+			"Could not marshal table configuration to JSON for state: "+err.Error(),
+		)
+		return
+	}
+	data.TableConfig = jsontypes.NewNormalizedValue(string(configJSON))
+
+	// Set ID and computed sensitive attribute if we built saslValue.
 	data.ID = types.StringValue(fullTableName)
+	if saslValue != "" {
+		data.SaslJaasConfig = types.StringValue(saslValue)
+	} else {
+		data.SaslJaasConfig = types.StringNull()
+	}
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
@@ -170,7 +215,9 @@ func (r *TableResource) Read(ctx context.Context, req resource.ReadRequest, resp
 	}
 
 	// Normalize and store the table configuration JSON.
-	configJSON, err := json.Marshal(tableConfig)
+	// Remove sasl.jaas.config before placing into state so we don't store the secret inside table_config.
+	cleanForState := removeSaslJaasFromTableConfig(tableConfig)
+	configJSON, err := json.Marshal(cleanForState)
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error Marshaling Table Config",
@@ -180,6 +227,11 @@ func (r *TableResource) Read(ctx context.Context, req resource.ReadRequest, resp
 	}
 
 	data.TableConfig = jsontypes.NewNormalizedValue(string(configJSON))
+
+	// Do NOT attempt to discover or populate password from remote API.
+	// We will set sasl_jaas_config to null unless the user provided it in plan/apply.
+	data.SaslJaasConfig = types.StringNull()
+
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
@@ -215,6 +267,15 @@ func (r *TableResource) Update(ctx context.Context, req resource.UpdateRequest, 
 		return
 	}
 
+	saslValue, err := buildSaslIfProvided(&data)
+	if err != nil {
+		resp.Diagnostics.AddError("Kafka Credentials Incomplete", err.Error())
+		return
+	}
+	if saslValue != "" {
+		injectKafkaSasl(&tableConfig, saslValue)
+	}
+
 	// Update via API (passthrough JSON).
 	if err := r.client.UpdateTable(ctx, tableConfig); err != nil {
 		resp.Diagnostics.AddError(
@@ -230,6 +291,26 @@ func (r *TableResource) Update(ctx context.Context, req resource.UpdateRequest, 
 			"Pinot Segment Reload Failed",
 			fmt.Sprintf("Updated table %s but segment reload failed: %v", joinTableID(data.TableName.ValueString(), data.TableType.ValueString()), err),
 		)
+	}
+
+	// For state: remove any sasl.jaas.config from the table_config JSON (we store it in a top-level sensitive attr instead).
+	cleanForState := removeSaslJaasFromTableConfig(tableConfig)
+	configJSON, err := json.Marshal(cleanForState)
+	if err != nil {
+		resp.Diagnostics.AddError(
+			"Error Marshaling Table Config",
+			"Could not marshal table configuration to JSON for state: "+err.Error(),
+		)
+		return
+	}
+	data.TableConfig = jsontypes.NewNormalizedValue(string(configJSON))
+
+	// Update computed sensitive attribute if we have a value.
+	if saslValue != "" {
+		data.SaslJaasConfig = types.StringValue(saslValue)
+	} else {
+		// Set to null to avoid retaining stale sensitive value when credentials are not provided.
+		data.SaslJaasConfig = types.StringNull()
 	}
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
@@ -366,4 +447,143 @@ func deleteTableByLogical(ctx context.Context, logical, typ string) error {
 	}
 
 	return fmt.Errorf("unexpected status deleting table %q type %q: %d", logical, typ, resp.StatusCode)
+}
+
+// buildSaslJaas constructs the sasl.jaas.config string for Kafka SCRAM.
+func buildSaslJaas(username, password string) string {
+	return fmt.Sprintf(`org.apache.kafka.common.security.scram.ScramLoginModule required username="%s" password="%s";`, username, password)
+}
+
+// injectKafkaSasl injects sasl.jaas.config into the provided tableConfig payload that will be sent to Pinot.
+// It supports both shapes: streamConfigMaps may be either a map[string]interface{} or []interface{} of maps.
+// When creating new value we prefer the list-of-maps shape.
+func injectKafkaSasl(tableConfig *TableConfig, sasl string) {
+	if tableConfig == nil {
+		return
+	}
+
+	ingestion, _ := (*tableConfig)["ingestionConfig"].(map[string]interface{})
+	if ingestion == nil {
+		ingestion = map[string]interface{}{}
+		(*tableConfig)["ingestionConfig"] = ingestion
+	}
+
+	streamIngestion, _ := ingestion["streamIngestionConfig"].(map[string]interface{})
+	if streamIngestion == nil {
+		streamIngestion = map[string]interface{}{}
+		ingestion["streamIngestionConfig"] = streamIngestion
+	}
+
+	switch v := streamIngestion["streamConfigMaps"].(type) {
+	case map[string]interface{}:
+		v["sasl.jaas.config"] = sasl
+		streamIngestion["streamConfigMaps"] = v
+	case []interface{}:
+		if len(v) == 0 {
+			m := map[string]interface{}{"sasl.jaas.config": sasl}
+			streamIngestion["streamConfigMaps"] = []interface{}{m}
+		} else {
+			firstMap, ok := v[0].(map[string]interface{})
+			if !ok {
+				m := map[string]interface{}{"sasl.jaas.config": sasl}
+				v[0] = m
+				streamIngestion["streamConfigMaps"] = v
+			} else {
+				firstMap["sasl.jaas.config"] = sasl
+			}
+		}
+	default:
+		m := map[string]interface{}{"sasl.jaas.config": sasl}
+		streamIngestion["streamConfigMaps"] = []interface{}{m}
+	}
+}
+
+// removeSaslJaasFromTableConfig returns a copy of the table config with sasl.jaas.config removed entirely
+// from any streamConfigMaps shape. This prevents storing the secret inside table_config in state.
+func removeSaslJaasFromTableConfig(input TableConfig) TableConfig {
+	if input == nil {
+		return nil
+	}
+
+	// shallow copy top-level
+	out := make(TableConfig)
+	for k, v := range input {
+		out[k] = v
+	}
+
+	ingestion, ok := out["ingestionConfig"].(map[string]interface{})
+	if !ok || ingestion == nil {
+		return out
+	}
+	// copy ingestion map
+	newIngestion := make(map[string]interface{})
+	for k, v := range ingestion {
+		newIngestion[k] = v
+	}
+	out["ingestionConfig"] = newIngestion
+
+	streamIngestion, ok := newIngestion["streamIngestionConfig"].(map[string]interface{})
+	if !ok || streamIngestion == nil {
+		return out
+	}
+	newStreamIngestion := make(map[string]interface{})
+	for k, v := range streamIngestion {
+		newStreamIngestion[k] = v
+	}
+	newIngestion["streamIngestionConfig"] = newStreamIngestion
+
+	// Handle map shape
+	if scm, ok := newStreamIngestion["streamConfigMaps"].(map[string]interface{}); ok && scm != nil {
+		newScm := make(map[string]interface{})
+		for k, v := range scm {
+			if k == "sasl.jaas.config" {
+				continue
+			}
+			newScm[k] = v
+		}
+		newStreamIngestion["streamConfigMaps"] = newScm
+		return out
+	}
+
+	// Handle list-of-maps shape
+	if scmList, ok := newStreamIngestion["streamConfigMaps"].([]interface{}); ok && scmList != nil {
+		newList := make([]interface{}, len(scmList))
+		for i, el := range scmList {
+			if m, ok := el.(map[string]interface{}); ok && m != nil {
+				newMap := make(map[string]interface{})
+				for k, v := range m {
+					if k == "sasl.jaas.config" {
+						continue
+					}
+					newMap[k] = v
+				}
+				newList[i] = newMap
+			} else {
+				// leave non-map elements untouched
+				newList[i] = el
+			}
+		}
+		newStreamIngestion["streamConfigMaps"] = newList
+	}
+
+	return out
+}
+
+func buildSaslIfProvided(data *TableResourceModel) (string, error) {
+	if data.KafkaUsername.IsNull() && data.KafkaPassword.IsNull() {
+		return "", nil
+	}
+
+	if data.KafkaUsername.IsNull() || data.KafkaPassword.IsNull() {
+		return "", fmt.Errorf("both kafka_username and kafka_password must be provided together")
+	}
+
+	username := data.KafkaUsername.ValueString()
+	password := data.KafkaPassword.ValueString()
+
+	if strings.TrimSpace(username) == "" || strings.TrimSpace(password) == "" {
+		return "", fmt.Errorf("both kafka_username and kafka_password must be non-empty")
+	}
+
+	return buildSaslJaas(username, password), nil
 }
