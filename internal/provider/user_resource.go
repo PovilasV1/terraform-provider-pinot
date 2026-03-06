@@ -203,27 +203,59 @@ func (r *UserResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 }
 
 func (r *UserResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
-	var data UserResourceModel
-	resp.Diagnostics.Append(req.Plan.Get(ctx, &data)...)
+	var plan UserResourceModel
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &plan)...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
-	tables := toStringSlice(ctx, &resp.Diagnostics, data.Tables)
-	perms := toStringSlice(ctx, &resp.Diagnostics, data.Permissions)
+	var state UserResourceModel
+	resp.Diagnostics.Append(req.State.Get(ctx, &state)...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	tables := toStringSlice(ctx, &resp.Diagnostics, plan.Tables)
+	perms := toStringSlice(ctx, &resp.Diagnostics, plan.Permissions)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
 	payload := map[string]interface{}{
-		"username":    data.Username.ValueString(),
-		"component":   data.Component.ValueString(),
-		"role":        data.Role.ValueString(),
+		"username":    plan.Username.ValueString(),
+		"component":   plan.Component.ValueString(),
+		"role":        plan.Role.ValueString(),
 		"tables":      tables,
 		"permissions": perms,
 	}
-	if !data.Password.IsNull() && data.Password.ValueString() != "" {
-		payload["password"] = data.Password.ValueString()
+	// Pinot's ZkBasicAuthAccessControl requires a BCrypt hash in the PUT body.
+	// Sending a plaintext value causes it to silently ignore field changes (tables,
+	// permissions); omitting it entirely clears the password and breaks auth (401).
+	//
+	// Strategy:
+	//   - Password explicitly changed in config (plan != state): send the new
+	//     plaintext — Pinot will hash it on the way in.
+	//   - Password unchanged: fetch the current BCrypt hash via GET and re-send
+	//     it so the PUT is accepted without altering the credential.
+	//     Fail hard if the hash cannot be retrieved — silently omitting the
+	//     password would wipe the credential on the server.
+	if !plan.Password.Equal(state.Password) && !plan.Password.IsNull() && plan.Password.ValueString() != "" {
+		payload["password"] = plan.Password.ValueString()
+	} else {
+		current, err := r.fetchUser(ctx, plan.Username.ValueString(), plan.Component.ValueString())
+		if err != nil {
+			resp.Diagnostics.AddError("Error Updating Pinot User",
+				fmt.Sprintf("could not fetch current password hash to preserve credentials: %v", err))
+			return
+		}
+		if current.Password == "" {
+			resp.Diagnostics.AddError("Error Updating Pinot User",
+				"Pinot did not return a password hash for the existing user; "+
+					"cannot safely update without risking credential loss — "+
+					"set an explicit `password` in your configuration to proceed")
+			return
+		}
+		payload["password"] = current.Password
 	}
 
 	if err := r.client.UpdateUser(ctx, payload); err != nil {
@@ -231,7 +263,7 @@ func (r *UserResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		return
 	}
 
-	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+	resp.Diagnostics.Append(resp.State.Set(ctx, &plan)...)
 }
 
 func (r *UserResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {
