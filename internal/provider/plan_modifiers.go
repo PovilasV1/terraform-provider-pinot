@@ -43,17 +43,24 @@ func (m jsonNullsIgnoredPlanModifier) PlanModifyString(_ context.Context, req pl
 		return
 	}
 
-	var planData, stateData interface{}
-	if err := json.Unmarshal([]byte(req.PlanValue.ValueString()), &planData); err != nil {
-		return
-	}
-	if err := json.Unmarshal([]byte(req.StateValue.ValueString()), &stateData); err != nil {
-		return
-	}
-
-	if reflect.DeepEqual(stripNullValues(stateData), stripNullValues(planData)) {
+	if jsonEqualIgnoringNulls(req.StateValue.ValueString(), req.PlanValue.ValueString()) {
 		resp.PlanValue = req.StateValue
 	}
+}
+
+// jsonEqualIgnoringNulls reports whether two JSON documents are structurally
+// equal once null-valued object keys are stripped. Invalid JSON on either
+// side returns false (the caller should treat that as "not equal" and let the
+// real diff flow through).
+func jsonEqualIgnoringNulls(a, b string) bool {
+	var aData, bData interface{}
+	if err := json.Unmarshal([]byte(a), &aData); err != nil {
+		return false
+	}
+	if err := json.Unmarshal([]byte(b), &bData); err != nil {
+		return false
+	}
+	return reflect.DeepEqual(stripNullValues(aData), stripNullValues(bData))
 }
 
 // saslJaasConfigPlanModifier preserves the sasl_jaas_config state value across

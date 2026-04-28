@@ -36,6 +36,24 @@ type SchemaResourceModel struct {
 // complexFieldSpecs, etc.
 type PinotSchemaConfig = map[string]interface{}
 
+// extractSchemaName pulls a non-empty `schemaName` string out of the parsed
+// schema JSON. Returns a targeted error so users get "schemaName is required"
+// rather than a downstream Schema Name Mismatch with an empty value.
+func extractSchemaName(m PinotSchemaConfig) (string, error) {
+	raw, ok := m["schemaName"]
+	if !ok {
+		return "", fmt.Errorf("schema JSON must include `schemaName`")
+	}
+	name, ok := raw.(string)
+	if !ok {
+		return "", fmt.Errorf("`schemaName` must be a string, got %T", raw)
+	}
+	if name == "" {
+		return "", fmt.Errorf("`schemaName` must not be empty")
+	}
+	return name, nil
+}
+
 func NewSchemaResource() resource.Resource {
 	return &SchemaResource{}
 }
@@ -113,7 +131,11 @@ func (r *SchemaResource) Create(ctx context.Context, req resource.CreateRequest,
 		return
 	}
 
-	jsonSchemaName, _ := pinotSchema["schemaName"].(string)
+	jsonSchemaName, err := extractSchemaName(pinotSchema)
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid Schema Configuration", err.Error())
+		return
+	}
 	if data.SchemaName.ValueString() != jsonSchemaName {
 		resp.Diagnostics.AddError(
 			"Schema Name Mismatch",
@@ -190,7 +212,11 @@ func (r *SchemaResource) Update(ctx context.Context, req resource.UpdateRequest,
 		return
 	}
 
-	jsonSchemaName, _ := pinotSchema["schemaName"].(string)
+	jsonSchemaName, err := extractSchemaName(pinotSchema)
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid Schema Configuration", err.Error())
+		return
+	}
 	if data.SchemaName.ValueString() != jsonSchemaName {
 		resp.Diagnostics.AddError(
 			"Schema Name Mismatch",
