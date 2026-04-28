@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"terraform-provider-pinot/internal/client"
 )
@@ -79,10 +81,19 @@ func (r *UserResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 			"component": rschema.StringAttribute{
 				Required:            true,
 				MarkdownDescription: "Pinot component: `CONTROLLER`, `BROKER`, or `SERVER`.",
+				Validators: []validator.String{
+					stringvalidator.OneOf("CONTROLLER", "BROKER", "SERVER"),
+				},
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.RequiresReplace(),
+				},
 			},
 			"role": rschema.StringAttribute{
 				Required:            true,
 				MarkdownDescription: "Role: typically `ADMIN` or `USER`.",
+				Validators: []validator.String{
+					stringvalidator.OneOf("ADMIN", "USER"),
+				},
 			},
 			"tables": rschema.ListAttribute{
 				ElementType:         types.StringType,
@@ -182,6 +193,10 @@ func (r *UserResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 
 	u, err := r.fetchUser(ctx, data.Username.ValueString(), data.Component.ValueString())
 	if err != nil {
+		if client.IsNotFound(err) {
+			resp.State.RemoveResource(ctx)
+			return
+		}
 		resp.Diagnostics.AddError("Error Reading Pinot User",
 			fmt.Sprintf("Could not read user %q: %v", data.Username.ValueString(), err))
 		return
@@ -221,12 +236,12 @@ func (r *UserResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		return
 	}
 
-	payload := map[string]interface{}{
-		"username":    plan.Username.ValueString(),
-		"component":   plan.Component.ValueString(),
-		"role":        plan.Role.ValueString(),
-		"tables":      tables,
-		"permissions": perms,
+	payload := PinotUser{
+		Username:    plan.Username.ValueString(),
+		Component:   plan.Component.ValueString(),
+		Role:        plan.Role.ValueString(),
+		Tables:      tables,
+		Permissions: perms,
 	}
 	// Pinot's ZkBasicAuthAccessControl requires a BCrypt hash in the PUT body.
 	// Sending a plaintext value causes it to silently ignore field changes (tables,
@@ -240,7 +255,7 @@ func (r *UserResource) Update(ctx context.Context, req resource.UpdateRequest, r
 	//     Fail hard if the hash cannot be retrieved — silently omitting the
 	//     password would wipe the credential on the server.
 	if !plan.Password.Equal(state.Password) && !plan.Password.IsNull() && plan.Password.ValueString() != "" {
-		payload["password"] = plan.Password.ValueString()
+		payload.Password = plan.Password.ValueString()
 	} else {
 		current, err := r.fetchUser(ctx, plan.Username.ValueString(), plan.Component.ValueString())
 		if err != nil {
@@ -255,10 +270,10 @@ func (r *UserResource) Update(ctx context.Context, req resource.UpdateRequest, r
 					"set an explicit `password` in your configuration to proceed")
 			return
 		}
-		payload["password"] = current.Password
+		payload.Password = current.Password
 	}
 
-	if err := r.client.UpdateUser(ctx, payload); err != nil {
+	if err := r.client.UpdateUser(ctx, payload.Username, payload.Component, payload); err != nil {
 		resp.Diagnostics.AddError("Error Updating Pinot User", err.Error())
 		return
 	}

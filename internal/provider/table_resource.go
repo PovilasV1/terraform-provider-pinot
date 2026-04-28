@@ -5,9 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
-	"net/url"
-	"os"
 	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework-jsontypes/jsontypes"
@@ -82,6 +79,9 @@ func (r *TableResource) Schema(ctx context.Context, req resource.SchemaRequest, 
 				Required:            true,
 				MarkdownDescription: "JSON configuration of the Pinot table. Prefer `jsonencode({...})` for stability.",
 				CustomType:          jsontypes.NormalizedType{},
+				PlanModifiers: []planmodifier.String{
+					JSONNullsIgnoredPlanModifier(),
+				},
 			},
 			"kafka_username": schema.StringAttribute{
 				Optional:            true,
@@ -96,6 +96,9 @@ func (r *TableResource) Schema(ctx context.Context, req resource.SchemaRequest, 
 				Computed:            true,
 				Sensitive:           true,
 				MarkdownDescription: "Computed sensitive value containing the injected sasl.jaas.config when kafka_username and kafka_password are provided.",
+				PlanModifiers: []planmodifier.String{
+					SaslJaasConfigPlanModifier(),
+				},
 			},
 		},
 	}
@@ -202,8 +205,7 @@ func (r *TableResource) Read(ctx context.Context, req resource.ReadRequest, resp
 	// Get table configuration from API by suffixed ID.
 	tableConfig, err := r.client.GetTable(ctx, data.ID.ValueString())
 	if err != nil {
-		// If the server returns 404, drop state.
-		if strings.Contains(err.Error(), "404") {
+		if client.IsNotFound(err) {
 			resp.State.RemoveResource(ctx)
 			return
 		}
@@ -215,8 +217,11 @@ func (r *TableResource) Read(ctx context.Context, req resource.ReadRequest, resp
 	}
 
 	// Normalize and store the table configuration JSON.
-	// Remove sasl.jaas.config before placing into state so we don't store the secret inside table_config.
-	cleanForState := removeSaslJaasFromTableConfig(tableConfig)
+	// Remove sasl.jaas.config so we don't store the secret inside table_config,
+	// and strip null-valued keys the controller stamps onto unset fields
+	// (e.g. "indexes": null on field configs) which would otherwise perma-diff
+	// against user HCL that omits those keys.
+	cleanForState := stripNullValues(removeSaslJaasFromTableConfig(tableConfig))
 	configJSON, err := json.Marshal(cleanForState)
 	if err != nil {
 		resp.Diagnostics.AddError(
@@ -228,10 +233,10 @@ func (r *TableResource) Read(ctx context.Context, req resource.ReadRequest, resp
 
 	data.TableConfig = jsontypes.NewNormalizedValue(string(configJSON))
 
-	// Do NOT attempt to discover or populate password from remote API.
-	// We will set sasl_jaas_config to null unless the user provided it in plan/apply.
-	data.SaslJaasConfig = types.StringNull()
-
+	// sasl_jaas_config is a Computed sensitive attribute set during Create/Update
+	// from kafka_username + kafka_password. Pinot does not return secrets, so we
+	// preserve whatever's already in state rather than clobbering it to null —
+	// otherwise every apply would show a synthetic "+ sasl_jaas_config" diff.
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
 
@@ -277,7 +282,7 @@ func (r *TableResource) Update(ctx context.Context, req resource.UpdateRequest, 
 	}
 
 	// Update via API (passthrough JSON).
-	if err := r.client.UpdateTable(ctx, tableConfig); err != nil {
+	if err := r.client.UpdateTable(ctx, fullTableName, tableConfig); err != nil {
 		resp.Diagnostics.AddError(
 			"Error Updating Pinot Table",
 			"Could not update table, unexpected error: "+err.Error(),
@@ -343,16 +348,12 @@ func (r *TableResource) Delete(ctx context.Context, req resource.DeleteRequest, 
 		return
 	}
 
-	// Primary path: DELETE /tables/{logical}?type=OFFLINE|REALTIME
-	if err := deleteTableByLogical(ctx, logical, typ); err != nil {
-		// Fallback: try legacy suffixed delete via client (if supported)
-		if fallbackErr := r.client.DeleteTable(ctx, joinTableID(logical, typ)); fallbackErr != nil {
-			resp.Diagnostics.AddError(
-				"Error Deleting Pinot Table",
-				fmt.Sprintf("logical delete failed: %v; fallback delete failed: %v", err, fallbackErr),
-			)
-			return
-		}
+	if err := r.client.DeleteTableByLogical(ctx, logical, typ); err != nil {
+		resp.Diagnostics.AddError(
+			"Error Deleting Pinot Table",
+			fmt.Sprintf("Could not delete table %s_%s: %v", logical, typ, err),
+		)
+		return
 	}
 }
 
@@ -396,62 +397,17 @@ func joinTableID(logical, typ string) string {
 	return fmt.Sprintf("%s_%s", logical, typ)
 }
 
-// deleteTableByLogical performs:
-//
-//	DELETE {PINOT_CONTROLLER_URL}/tables/{logical}?type={typ}
-//
-// It honors optional env vars for Database header and auth.
-func deleteTableByLogical(ctx context.Context, logical, typ string) error {
-	base := strings.TrimRight(os.Getenv("PINOT_CONTROLLER_URL"), "/")
-	if base == "" {
-		return fmt.Errorf("PINOT_CONTROLLER_URL not set")
-	}
-
-	u, err := url.Parse(base + "/tables/" + url.PathEscape(logical))
-	if err != nil {
-		return err
-	}
-	q := u.Query()
-	q.Set("type", strings.ToUpper(typ))
-	u.RawQuery = q.Encode()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, u.String(), nil)
-	if err != nil {
-		return err
-	}
-
-	// Optional multi-DB header
-	if db := strings.TrimSpace(os.Getenv("PINOT_DATABASE")); db != "" {
-		req.Header.Set("Database", db)
-	}
-
-	// Optional auth: basic or bearer
-	if token := strings.TrimSpace(os.Getenv("PINOT_TOKEN")); token != "" {
-		req.Header.Set("Authorization", "Basic "+token)
-	} else if uName, p := os.Getenv("PINOT_USERNAME"), os.Getenv("PINOT_PASSWORD"); uName != "" || p != "" {
-		req.SetBasicAuth(uName, p)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	// 200/202/204 => deleted; 404 => already gone.
-	if resp.StatusCode == http.StatusOK ||
-		resp.StatusCode == http.StatusAccepted ||
-		resp.StatusCode == http.StatusNoContent ||
-		resp.StatusCode == http.StatusNotFound {
-		return nil
-	}
-
-	return fmt.Errorf("unexpected status deleting table %q type %q: %d", logical, typ, resp.StatusCode)
+// jaasEscape escapes characters that would otherwise terminate the quoted
+// JAAS string (`"` and `\`). Without this, a credential containing either of
+// those characters silently produces a malformed config that the broker rejects.
+func jaasEscape(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+	return r.Replace(s)
 }
 
 // buildSaslJaas constructs the sasl.jaas.config string for Kafka SCRAM.
 func buildSaslJaas(username, password string) string {
-	return fmt.Sprintf(`org.apache.kafka.common.security.scram.ScramLoginModule required username="%s" password="%s";`, username, password)
+	return fmt.Sprintf(`org.apache.kafka.common.security.scram.ScramLoginModule required username="%s" password="%s";`, jaasEscape(username), jaasEscape(password))
 }
 
 // injectKafkaSasl injects sasl.jaas.config into the provided tableConfig payload that will be sent to Pinot.
