@@ -307,6 +307,15 @@ func (r *UserResource) ImportState(ctx context.Context, req resource.ImportState
 		return
 	}
 	username, component := parts[0], strings.ToUpper(parts[1])
+	// Validators don't run on import. Reject invalid components here so the
+	// resource never enters state in a shape Read will then 404 on.
+	if !isValidUserComponent(component) {
+		resp.Diagnostics.AddError(
+			"Invalid Import Component",
+			fmt.Sprintf("Component %q is not recognized. Must be one of: CONTROLLER, BROKER, SERVER.", parts[1]),
+		)
+		return
+	}
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("username"), username)...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("component"), component)...)
 	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), userID(username, component))...)
@@ -317,6 +326,15 @@ func (r *UserResource) ImportState(ctx context.Context, req resource.ImportState
 // the same username exists for multiple components.
 func userID(username, component string) string {
 	return username + "|" + component
+}
+
+func isValidUserComponent(component string) bool {
+	switch component {
+	case "CONTROLLER", "BROKER", "SERVER":
+		return true
+	default:
+		return false
+	}
 }
 
 /* ---------- helpers ---------- */

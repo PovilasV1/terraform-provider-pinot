@@ -10,6 +10,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -90,9 +91,11 @@ func (r *SchemaResource) Schema(ctx context.Context, req resource.SchemaRequest,
 			},
 			"force_update": schema.BoolAttribute{
 				Optional: true,
+				Computed: true,
+				Default:  booldefault.StaticBool(false),
 				MarkdownDescription: "When `true`, the provider sends `?force=true` on schema updates so the Pinot controller " +
 					"accepts backward-incompatible changes such as converting a column from single-valued to multi-valued. " +
-					"If unset, it is treated as `false`. Note: existing segments retain old metadata until reloaded — running a segment " +
+					"Defaults to `false`. Note: existing segments retain old metadata until reloaded — running a segment " +
 					"reload (or, for realtime tables, a force-commit) is typically required for the change to take effect on stored data.",
 			},
 		},
@@ -193,6 +196,9 @@ func (r *SchemaResource) Read(ctx context.Context, req resource.ReadRequest, res
 	}
 
 	data.Schema = jsontypes.NewNormalizedValue(string(schemaJSON))
+	// Pin the id from schema_name so it survives import (where only schema_name
+	// is set) and refresh, instead of relying on Create to populate it.
+	data.ID = data.SchemaName
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
