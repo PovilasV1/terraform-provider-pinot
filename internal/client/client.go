@@ -111,7 +111,7 @@ func (c *PinotClient) CreateSchema(ctx context.Context, schema interface{}) erro
 }
 
 func (c *PinotClient) GetSchema(ctx context.Context, schemaName string) (map[string]interface{}, error) {
-	resp, err := c.doRequest(ctx, "GET", fmt.Sprintf("%s/schemas/%s", c.controllerURL, schemaName), nil)
+	resp, err := c.doRequest(ctx, "GET", fmt.Sprintf("%s/schemas/%s", c.controllerURL, url.PathEscape(schemaName)), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +142,7 @@ func (c *PinotClient) UpdateSchema(ctx context.Context, schemaName string, schem
 }
 
 func (c *PinotClient) DeleteSchema(ctx context.Context, schemaName string) error {
-	_, err := c.doRequest(ctx, "DELETE", fmt.Sprintf("%s/schemas/%s", c.controllerURL, schemaName), nil)
+	_, err := c.doRequest(ctx, "DELETE", fmt.Sprintf("%s/schemas/%s", c.controllerURL, url.PathEscape(schemaName)), nil)
 	return err
 }
 
@@ -153,7 +153,7 @@ func (c *PinotClient) CreateTable(ctx context.Context, tableConfig interface{}) 
 }
 
 func (c *PinotClient) GetTable(ctx context.Context, tableName string) (map[string]interface{}, error) {
-	resp, err := c.doRequest(ctx, "GET", fmt.Sprintf("%s/tables/%s", c.controllerURL, tableName), nil)
+	resp, err := c.doRequest(ctx, "GET", fmt.Sprintf("%s/tables/%s", c.controllerURL, url.PathEscape(tableName)), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +176,7 @@ func (c *PinotClient) UpdateTable(ctx context.Context, tableName string, tableCo
 	if tableName == "" {
 		return fmt.Errorf("table name is required")
 	}
-	_, err := c.doRequest(ctx, "PUT", fmt.Sprintf("%s/tables/%s", c.controllerURL, tableName), tableConfig)
+	_, err := c.doRequest(ctx, "PUT", fmt.Sprintf("%s/tables/%s", c.controllerURL, url.PathEscape(tableName)), tableConfig)
 	return err
 }
 

@@ -92,7 +92,7 @@ func (r *SchemaResource) Schema(ctx context.Context, req resource.SchemaRequest,
 				Optional: true,
 				MarkdownDescription: "When `true`, the provider sends `?force=true` on schema updates so the Pinot controller " +
 					"accepts backward-incompatible changes such as converting a column from single-valued to multi-valued. " +
-					"Defaults to `false`. Note: existing segments retain old metadata until reloaded — running a segment " +
+					"If unset, it is treated as `false`. Note: existing segments retain old metadata until reloaded — running a segment " +
 					"reload (or, for realtime tables, a force-commit) is typically required for the change to take effect on stored data.",
 			},
 		},
