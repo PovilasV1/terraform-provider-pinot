@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,6 +20,24 @@ type PinotClient struct {
 	username      string
 	password      string
 	token         string
+}
+
+// APIError is returned by doRequest for any non-2xx response, so callers can
+// branch on the HTTP status (e.g. treat 404 as "resource is gone") without
+// string-matching on the error message.
+type APIError struct {
+	Status int
+	Body   string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("API error (status %d): %s", e.Status, e.Body)
+}
+
+// IsNotFound reports whether err is an APIError with HTTP 404.
+func IsNotFound(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound
 }
 
 func NewPinotClient(controllerURL, username, password string) (*PinotClient, error) {
@@ -79,7 +98,7 @@ func (c *PinotClient) doRequest(ctx context.Context, method, url string, body in
 	}
 
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("API error (status %d): %s", resp.StatusCode, string(respBody))
+		return nil, &APIError{Status: resp.StatusCode, Body: string(respBody)}
 	}
 
 	return respBody, nil
@@ -92,7 +111,7 @@ func (c *PinotClient) CreateSchema(ctx context.Context, schema interface{}) erro
 }
 
 func (c *PinotClient) GetSchema(ctx context.Context, schemaName string) (map[string]interface{}, error) {
-	resp, err := c.doRequest(ctx, "GET", fmt.Sprintf("%s/schemas/%s", c.controllerURL, schemaName), nil)
+	resp, err := c.doRequest(ctx, "GET", fmt.Sprintf("%s/schemas/%s", c.controllerURL, url.PathEscape(schemaName)), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -105,25 +124,25 @@ func (c *PinotClient) GetSchema(ctx context.Context, schemaName string) (map[str
 	return schema, nil
 }
 
-func (c *PinotClient) UpdateSchema(ctx context.Context, schema interface{}) error {
-	jsonBytes, err := json.Marshal(schema)
-	if err != nil {
-		return fmt.Errorf("failed to marshal schema: %w", err)
+// UpdateSchema PUTs the schema to /schemas/{schemaName}. When forceUpdate is
+// true, ?force=true is appended so the controller accepts backward-incompatible
+// changes (e.g. converting a column from singleValueField=true to false).
+// Without this flag, Pinot rejects such changes with
+// "Backward incompatible schema. Only allow adding new columns".
+func (c *PinotClient) UpdateSchema(ctx context.Context, schemaName string, schema interface{}, forceUpdate bool) error {
+	if schemaName == "" {
+		return fmt.Errorf("schema name is required")
 	}
-	var schemaMap map[string]interface{}
-	if err := json.Unmarshal(jsonBytes, &schemaMap); err != nil {
-		return fmt.Errorf("failed to unmarshal schema: %w", err)
+	endpoint := fmt.Sprintf("%s/schemas/%s", c.controllerURL, url.PathEscape(schemaName))
+	if forceUpdate {
+		endpoint += "?force=true"
 	}
-	schemaName, ok := schemaMap["schemaName"].(string)
-	if !ok {
-		return fmt.Errorf("schema name not found")
-	}
-	_, err = c.doRequest(ctx, "PUT", fmt.Sprintf("%s/schemas/%s", c.controllerURL, schemaName), schema)
+	_, err := c.doRequest(ctx, "PUT", endpoint, schema)
 	return err
 }
 
 func (c *PinotClient) DeleteSchema(ctx context.Context, schemaName string) error {
-	_, err := c.doRequest(ctx, "DELETE", fmt.Sprintf("%s/schemas/%s", c.controllerURL, schemaName), nil)
+	_, err := c.doRequest(ctx, "DELETE", fmt.Sprintf("%s/schemas/%s", c.controllerURL, url.PathEscape(schemaName)), nil)
 	return err
 }
 
@@ -134,7 +153,7 @@ func (c *PinotClient) CreateTable(ctx context.Context, tableConfig interface{}) 
 }
 
 func (c *PinotClient) GetTable(ctx context.Context, tableName string) (map[string]interface{}, error) {
-	resp, err := c.doRequest(ctx, "GET", fmt.Sprintf("%s/tables/%s", c.controllerURL, tableName), nil)
+	resp, err := c.doRequest(ctx, "GET", fmt.Sprintf("%s/tables/%s", c.controllerURL, url.PathEscape(tableName)), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -153,25 +172,33 @@ func (c *PinotClient) GetTable(ctx context.Context, tableName string) (map[strin
 	return response, nil
 }
 
-func (c *PinotClient) UpdateTable(ctx context.Context, tableConfig interface{}) error {
-	jsonBytes, err := json.Marshal(tableConfig)
-	if err != nil {
-		return fmt.Errorf("failed to marshal table config: %w", err)
+func (c *PinotClient) UpdateTable(ctx context.Context, tableName string, tableConfig interface{}) error {
+	if tableName == "" {
+		return fmt.Errorf("table name is required")
 	}
-	var tableMap map[string]interface{}
-	if err := json.Unmarshal(jsonBytes, &tableMap); err != nil {
-		return fmt.Errorf("failed to unmarshal table config: %w", err)
-	}
-	tableName, ok := tableMap["tableName"].(string)
-	if !ok {
-		return fmt.Errorf("table name not found")
-	}
-	_, err = c.doRequest(ctx, "PUT", fmt.Sprintf("%s/tables/%s", c.controllerURL, tableName), tableConfig)
+	_, err := c.doRequest(ctx, "PUT", fmt.Sprintf("%s/tables/%s", c.controllerURL, url.PathEscape(tableName)), tableConfig)
 	return err
 }
 
-func (c *PinotClient) DeleteTable(ctx context.Context, tableName string) error {
-	_, err := c.doRequest(ctx, "DELETE", fmt.Sprintf("%s/tables/%s", c.controllerURL, tableName), nil)
+// DeleteTableByLogical deletes via DELETE /tables/{logical}?type={typ}, which is
+// the documented endpoint. Routes through the configured client (URL + auth)
+// rather than reading env vars directly.
+func (c *PinotClient) DeleteTableByLogical(ctx context.Context, logical, tableType string) error {
+	if logical == "" {
+		return fmt.Errorf("table name is required")
+	}
+	if tableType == "" {
+		return fmt.Errorf("table type is required")
+	}
+	endpoint := fmt.Sprintf("%s/tables/%s?type=%s",
+		c.controllerURL,
+		url.PathEscape(logical),
+		url.QueryEscape(strings.ToUpper(tableType)),
+	)
+	_, err := c.doRequest(ctx, "DELETE", endpoint, nil)
+	if IsNotFound(err) {
+		return nil
+	}
 	return err
 }
 
@@ -223,23 +250,12 @@ func (c *PinotClient) GetUser(ctx context.Context, username, component string) (
 	return m, nil
 }
 
-func (c *PinotClient) UpdateUser(ctx context.Context, user interface{}) error {
-	jsonBytes, err := json.Marshal(user)
-	if err != nil {
-		return fmt.Errorf("failed to marshal user: %w", err)
-	}
-	var m map[string]interface{}
-	if err := json.Unmarshal(jsonBytes, &m); err != nil {
-		return fmt.Errorf("failed to unmarshal user: %w", err)
-	}
-
-	username, _ := m["username"].(string)
-	component, _ := m["component"].(string)
+func (c *PinotClient) UpdateUser(ctx context.Context, username, component string, user interface{}) error {
 	if username == "" {
-		return fmt.Errorf("username not found")
+		return fmt.Errorf("username is required")
 	}
 	if component == "" {
-		return fmt.Errorf("component not found")
+		return fmt.Errorf("component is required")
 	}
 
 	v := url.Values{}
@@ -252,7 +268,7 @@ func (c *PinotClient) UpdateUser(ctx context.Context, user interface{}) error {
 		v.Encode(),
 	)
 
-	_, err = c.doRequest(ctx, "PUT", endpoint, user)
+	_, err := c.doRequest(ctx, "PUT", endpoint, user)
 	return err
 }
 

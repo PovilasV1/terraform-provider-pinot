@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/hashicorp/terraform-plugin-framework-validators/stringvalidator"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	rschema "github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
+	"github.com/hashicorp/terraform-plugin-framework/schema/validator"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"terraform-provider-pinot/internal/client"
 )
@@ -55,7 +57,7 @@ func (r *UserResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 		Attributes: map[string]rschema.Attribute{
 			"id": rschema.StringAttribute{
 				Computed:            true,
-				MarkdownDescription: "Resource identifier (same as `username`).",
+				MarkdownDescription: "Resource identifier in the form `username|component`. Pinot users are uniquely keyed by both.",
 				PlanModifiers: []planmodifier.String{
 					stringplanmodifier.UseStateForUnknown(),
 				},
@@ -79,10 +81,19 @@ func (r *UserResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 			"component": rschema.StringAttribute{
 				Required:            true,
 				MarkdownDescription: "Pinot component: `CONTROLLER`, `BROKER`, or `SERVER`.",
+				Validators: []validator.String{
+					stringvalidator.OneOf("CONTROLLER", "BROKER", "SERVER"),
+				},
+				PlanModifiers: []planmodifier.String{
+					stringplanmodifier.RequiresReplace(),
+				},
 			},
 			"role": rschema.StringAttribute{
 				Required:            true,
 				MarkdownDescription: "Role: typically `ADMIN` or `USER`.",
+				Validators: []validator.String{
+					stringvalidator.OneOf("ADMIN", "USER"),
+				},
 			},
 			"tables": rschema.ListAttribute{
 				ElementType:         types.StringType,
@@ -145,7 +156,7 @@ func (r *UserResource) Create(ctx context.Context, req resource.CreateRequest, r
 		return
 	}
 
-	data.ID = types.StringValue(payload.Username)
+	data.ID = types.StringValue(userID(payload.Username, payload.Component))
 
 	if u, err := r.fetchUser(ctx, payload.Username, payload.Component); err == nil {
 		data.Username = types.StringValue(u.Username)
@@ -182,12 +193,16 @@ func (r *UserResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 
 	u, err := r.fetchUser(ctx, data.Username.ValueString(), data.Component.ValueString())
 	if err != nil {
+		if client.IsNotFound(err) {
+			resp.State.RemoveResource(ctx)
+			return
+		}
 		resp.Diagnostics.AddError("Error Reading Pinot User",
 			fmt.Sprintf("Could not read user %q: %v", data.Username.ValueString(), err))
 		return
 	}
 
-	data.ID = types.StringValue(u.Username)
+	data.ID = types.StringValue(userID(u.Username, u.Component))
 	data.Username = types.StringValue(u.Username)
 	data.Component = types.StringValue(u.Component)
 	data.Role = types.StringValue(u.Role)
@@ -221,12 +236,12 @@ func (r *UserResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		return
 	}
 
-	payload := map[string]interface{}{
-		"username":    plan.Username.ValueString(),
-		"component":   plan.Component.ValueString(),
-		"role":        plan.Role.ValueString(),
-		"tables":      tables,
-		"permissions": perms,
+	payload := PinotUser{
+		Username:    plan.Username.ValueString(),
+		Component:   plan.Component.ValueString(),
+		Role:        plan.Role.ValueString(),
+		Tables:      tables,
+		Permissions: perms,
 	}
 	// Pinot's ZkBasicAuthAccessControl requires a BCrypt hash in the PUT body.
 	// Sending a plaintext value causes it to silently ignore field changes (tables,
@@ -240,7 +255,7 @@ func (r *UserResource) Update(ctx context.Context, req resource.UpdateRequest, r
 	//     Fail hard if the hash cannot be retrieved — silently omitting the
 	//     password would wipe the credential on the server.
 	if !plan.Password.Equal(state.Password) && !plan.Password.IsNull() && plan.Password.ValueString() != "" {
-		payload["password"] = plan.Password.ValueString()
+		payload.Password = plan.Password.ValueString()
 	} else {
 		current, err := r.fetchUser(ctx, plan.Username.ValueString(), plan.Component.ValueString())
 		if err != nil {
@@ -255,10 +270,10 @@ func (r *UserResource) Update(ctx context.Context, req resource.UpdateRequest, r
 					"set an explicit `password` in your configuration to proceed")
 			return
 		}
-		payload["password"] = current.Password
+		payload.Password = current.Password
 	}
 
-	if err := r.client.UpdateUser(ctx, payload); err != nil {
+	if err := r.client.UpdateUser(ctx, payload.Username, payload.Component, payload); err != nil {
 		resp.Diagnostics.AddError("Error Updating Pinot User", err.Error())
 		return
 	}
@@ -282,14 +297,44 @@ func (r *UserResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 }
 
 func (r *UserResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
-	id := req.ID
-	if parts := strings.SplitN(id, "|", 2); len(parts) == 2 {
-		resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("username"), parts[0])...)
-		resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("component"), parts[1])...)
-		resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), parts[0])...)
+	parts := strings.SplitN(req.ID, "|", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		resp.Diagnostics.AddError(
+			"Invalid Import ID",
+			"Import ID must be in format: username|component (e.g., admin|CONTROLLER). "+
+				"Pinot identifies users by both username and component.",
+		)
 		return
 	}
-	resource.ImportStatePassthroughID(ctx, path.Root("username"), req, resp)
+	username, component := parts[0], strings.ToUpper(parts[1])
+	// Validators don't run on import. Reject invalid components here so the
+	// resource never enters state in a shape Read will then 404 on.
+	if !isValidUserComponent(component) {
+		resp.Diagnostics.AddError(
+			"Invalid Import Component",
+			fmt.Sprintf("Component %q is not recognized. Must be one of: CONTROLLER, BROKER, SERVER.", parts[1]),
+		)
+		return
+	}
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("username"), username)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("component"), component)...)
+	resp.Diagnostics.Append(resp.State.SetAttribute(ctx, path.Root("id"), userID(username, component))...)
+}
+
+// userID returns the canonical resource id for a Pinot user. Pinot keys users
+// by (username, component), so encoding both keeps state IDs unique even when
+// the same username exists for multiple components.
+func userID(username, component string) string {
+	return username + "|" + component
+}
+
+func isValidUserComponent(component string) bool {
+	switch component {
+	case "CONTROLLER", "BROKER", "SERVER":
+		return true
+	default:
+		return false
+	}
 }
 
 /* ---------- helpers ---------- */

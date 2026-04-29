@@ -10,6 +10,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
@@ -24,32 +25,34 @@ type SchemaResource struct {
 }
 
 type SchemaResourceModel struct {
-	ID         types.String         `tfsdk:"id"`
-	SchemaName types.String         `tfsdk:"schema_name"`
-	Schema     jsontypes.Normalized `tfsdk:"schema"`
+	ID          types.String         `tfsdk:"id"`
+	SchemaName  types.String         `tfsdk:"schema_name"`
+	Schema      jsontypes.Normalized `tfsdk:"schema"`
+	ForceUpdate types.Bool           `tfsdk:"force_update"`
 }
 
-// Pinot schema JSON structure.
-type PinotSchema struct {
-	SchemaName            string         `json:"schemaName"`
-	EnableColumnBasedNull bool           `json:"enableColumnBasedNullHandling,omitempty"`
-	DimensionFieldSpecs   []FieldSpec    `json:"dimensionFieldSpecs,omitempty"`
-	MetricFieldSpecs      []FieldSpec    `json:"metricFieldSpecs,omitempty"`
-	DateTimeFieldSpecs    []DateTimeSpec `json:"dateTimeFieldSpecs,omitempty"`
-}
+// PinotSchemaConfig is a passthrough JSON object — every key the user wrote is
+// forwarded to the controller verbatim. Decoding into a typed struct silently
+// dropped fields like singleValueField=false, maxLength, transformFunction,
+// complexFieldSpecs, etc.
+type PinotSchemaConfig = map[string]interface{}
 
-type FieldSpec struct {
-	Name             string      `json:"name"`
-	DataType         string      `json:"dataType"`
-	SingleValueField bool        `json:"singleValueField,omitempty"`
-	DefaultNullValue interface{} `json:"defaultNullValue,omitempty"`
-}
-
-type DateTimeSpec struct {
-	Name        string `json:"name"`
-	DataType    string `json:"dataType"`
-	Format      string `json:"format"`
-	Granularity string `json:"granularity"`
+// extractSchemaName pulls a non-empty `schemaName` string out of the parsed
+// schema JSON. Returns a targeted error so users get "schemaName is required"
+// rather than a downstream Schema Name Mismatch with an empty value.
+func extractSchemaName(m PinotSchemaConfig) (string, error) {
+	raw, ok := m["schemaName"]
+	if !ok {
+		return "", fmt.Errorf("schema JSON must include `schemaName`")
+	}
+	name, ok := raw.(string)
+	if !ok {
+		return "", fmt.Errorf("`schemaName` must be a string, got %T", raw)
+	}
+	if name == "" {
+		return "", fmt.Errorf("`schemaName` must not be empty")
+	}
+	return name, nil
 }
 
 func NewSchemaResource() resource.Resource {
@@ -82,6 +85,18 @@ func (r *SchemaResource) Schema(ctx context.Context, req resource.SchemaRequest,
 				Required:            true,
 				MarkdownDescription: "JSON configuration of the Pinot schema",
 				CustomType:          jsontypes.NormalizedType{},
+				PlanModifiers: []planmodifier.String{
+					JSONNullsIgnoredPlanModifier(),
+				},
+			},
+			"force_update": schema.BoolAttribute{
+				Optional: true,
+				Computed: true,
+				Default:  booldefault.StaticBool(false),
+				MarkdownDescription: "When `true`, the provider sends `?force=true` on schema updates so the Pinot controller " +
+					"accepts backward-incompatible changes such as converting a column from single-valued to multi-valued. " +
+					"Defaults to `false`. Note: existing segments retain old metadata until reloaded — running a segment " +
+					"reload (or, for realtime tables, a force-commit) is typically required for the change to take effect on stored data.",
 			},
 		},
 	}
@@ -112,27 +127,28 @@ func (r *SchemaResource) Create(ctx context.Context, req resource.CreateRequest,
 		return
 	}
 
-	// Parse and validate the JSON schema
-	var pinotSchema PinotSchema
+	var pinotSchema PinotSchemaConfig
 	diags := data.Schema.Unmarshal(&pinotSchema)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
-	// Ensure schema name matches
-	if data.SchemaName.ValueString() != pinotSchema.SchemaName {
+	jsonSchemaName, err := extractSchemaName(pinotSchema)
+	if err != nil {
+		resp.Diagnostics.AddError("Invalid Schema Configuration", err.Error())
+		return
+	}
+	if data.SchemaName.ValueString() != jsonSchemaName {
 		resp.Diagnostics.AddError(
 			"Schema Name Mismatch",
 			fmt.Sprintf("The schema_name attribute (%s) must match the schemaName in the JSON configuration (%s)",
-				data.SchemaName.ValueString(), pinotSchema.SchemaName),
+				data.SchemaName.ValueString(), jsonSchemaName),
 		)
 		return
 	}
 
-	// Create schema via API
-	err := r.client.CreateSchema(ctx, &pinotSchema)
-	if err != nil {
+	if err := r.client.CreateSchema(ctx, pinotSchema); err != nil {
 		resp.Diagnostics.AddError(
 			"Error Creating Pinot Schema",
 			"Could not create schema, unexpected error: "+err.Error(),
@@ -140,7 +156,7 @@ func (r *SchemaResource) Create(ctx context.Context, req resource.CreateRequest,
 		return
 	}
 
-	data.ID = types.StringValue(pinotSchema.SchemaName)
+	data.ID = types.StringValue(jsonSchemaName)
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
@@ -153,9 +169,12 @@ func (r *SchemaResource) Read(ctx context.Context, req resource.ReadRequest, res
 		return
 	}
 
-	// Get schema from API
 	schema, err := r.client.GetSchema(ctx, data.SchemaName.ValueString())
 	if err != nil {
+		if client.IsNotFound(err) {
+			resp.State.RemoveResource(ctx)
+			return
+		}
 		resp.Diagnostics.AddError(
 			"Error Reading Pinot Schema",
 			"Could not read schema ID "+data.ID.ValueString()+": "+err.Error(),
@@ -163,8 +182,11 @@ func (r *SchemaResource) Read(ctx context.Context, req resource.ReadRequest, res
 		return
 	}
 
-	// Update the schema JSON
-	schemaJSON, err := json.Marshal(schema)
+	// Pinot's GET response stamps `"indexes": null` (and other null-valued
+	// keys) onto field specs the user never wrote. Storing those into state
+	// produces a perma-diff against user HCL that omits the keys. Strip nulls
+	// so the state matches the user's representation.
+	schemaJSON, err := json.Marshal(stripNullValues(schema))
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error Marshaling Schema",
@@ -174,6 +196,9 @@ func (r *SchemaResource) Read(ctx context.Context, req resource.ReadRequest, res
 	}
 
 	data.Schema = jsontypes.NewNormalizedValue(string(schemaJSON))
+	// Pin the id from schema_name so it survives import (where only schema_name
+	// is set) and refresh, instead of relying on Create to populate it.
+	data.ID = data.SchemaName
 
 	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 }
@@ -186,17 +211,28 @@ func (r *SchemaResource) Update(ctx context.Context, req resource.UpdateRequest,
 		return
 	}
 
-	// Parse the updated schema
-	var pinotSchema PinotSchema
+	var pinotSchema PinotSchemaConfig
 	diags := data.Schema.Unmarshal(&pinotSchema)
 	resp.Diagnostics.Append(diags...)
 	if resp.Diagnostics.HasError() {
 		return
 	}
 
-	// Update schema via API
-	err := r.client.UpdateSchema(ctx, &pinotSchema)
+	jsonSchemaName, err := extractSchemaName(pinotSchema)
 	if err != nil {
+		resp.Diagnostics.AddError("Invalid Schema Configuration", err.Error())
+		return
+	}
+	if data.SchemaName.ValueString() != jsonSchemaName {
+		resp.Diagnostics.AddError(
+			"Schema Name Mismatch",
+			fmt.Sprintf("The schema_name attribute (%s) must match the schemaName in the JSON configuration (%s)",
+				data.SchemaName.ValueString(), jsonSchemaName),
+		)
+		return
+	}
+
+	if err := r.client.UpdateSchema(ctx, jsonSchemaName, pinotSchema, data.ForceUpdate.ValueBool()); err != nil {
 		resp.Diagnostics.AddError(
 			"Error Updating Pinot Schema",
 			"Could not update schema, unexpected error: "+err.Error(),
@@ -227,4 +263,31 @@ func (r *SchemaResource) Delete(ctx context.Context, req resource.DeleteRequest,
 
 func (r *SchemaResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {
 	resource.ImportStatePassthroughID(ctx, path.Root("schema_name"), req, resp)
+}
+
+// stripNullValues recursively drops keys whose value is JSON null from any
+// nested object inside v. Slice elements are preserved positionally; only
+// object keys are removed. Used to filter Pinot controller responses before
+// they hit Terraform state, so user HCL that omits a key doesn't perma-diff
+// against state where the controller materialized that same key as null.
+func stripNullValues(v interface{}) interface{} {
+	switch x := v.(type) {
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(x))
+		for k, val := range x {
+			if val == nil {
+				continue
+			}
+			out[k] = stripNullValues(val)
+		}
+		return out
+	case []interface{}:
+		out := make([]interface{}, len(x))
+		for i, el := range x {
+			out[i] = stripNullValues(el)
+		}
+		return out
+	default:
+		return v
+	}
 }
