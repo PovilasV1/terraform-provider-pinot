@@ -13,6 +13,7 @@ import (
 
 	"github.com/hashicorp/terraform-plugin-testing/helper/acctest"
 	"github.com/hashicorp/terraform-plugin-testing/helper/resource"
+	"github.com/hashicorp/terraform-plugin-testing/plancheck"
 	"github.com/hashicorp/terraform-plugin-testing/terraform"
 )
 
@@ -39,6 +40,12 @@ func TestAccPinotTable_basic(t *testing.T) {
 				ResourceName:      "pinot_table.test",
 				ImportState:       true,
 				ImportStateVerify: true,
+				// Import has no prior state to reconcile against, so it stores the
+				// controller's full normalized config (a superset of a reconciled
+				// apply-state, and version-dependent — newer Pinot releases stamp
+				// extra tableIndexConfig keys). Byte-equality on the JSON blob can't
+				// hold across versions; id/table_name/table_type are still verified.
+				ImportStateVerifyIgnore: []string{"table_config"},
 			},
 		},
 	})
@@ -66,6 +73,112 @@ func TestAccPinotTable_realtime(t *testing.T) {
 			},
 		},
 	})
+}
+
+// TestAccPinotTable_noPermaDiff is the regression guard for the controller
+// default-stamping perma-diff (see internal/provider/json_reconcile.go). It
+// deliberately writes a *minimal* table config: tableIndexConfig carries only
+// loadMode, segmentsConfig omits minimizeDataMovement, and every fieldConfigList
+// entry sets tierOverwrites = null. Against any Pinot 1.4.x/1.5.x controller
+// this makes the server stamp ~15 tableIndexConfig defaults (including
+// optimizeNoDictStatsCollection), fieldConfigList defaults (indexTypes:[],
+// indexes:null, tierOverwrites:null) and segmentsConfig.minimizeDataMovement.
+//
+// Both plan checks assert an EMPTY plan after apply+refresh — i.e. the reconcile
+// dropped the controller-stamped keys and preserved the user's explicit nulls.
+// Under the pre-fix provider this test fails with a non-empty plan.
+func TestAccPinotTable_noPermaDiff(t *testing.T) {
+	rName := acctest.RandStringFromCharSet(10, acctest.CharSetAlphaNum)
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { testAccPreCheck(t) },
+		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
+		CheckDestroy:             testAccCheckPinotTableDestroy,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccPinotTableConfig_minimal(rName),
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckPinotTableExists("pinot_table.test"),
+					resource.TestCheckResourceAttr("pinot_table.test", "table_type", "OFFLINE"),
+				),
+				// After apply + refresh the plan must be empty: the controller
+				// stamped its defaults, and the provider must have reconciled
+				// them away rather than surfacing a perma-diff.
+				ConfigPlanChecks: resource.ConfigPlanChecks{
+					PostApplyPostRefresh: []plancheck.PlanCheck{
+						plancheck.ExpectEmptyPlan(),
+					},
+				},
+			},
+			{
+				// Belt-and-suspenders: a standalone plan against the applied
+				// state must also be empty.
+				Config:             testAccPinotTableConfig_minimal(rName),
+				PlanOnly:           true,
+				ExpectNonEmptyPlan: false,
+			},
+		},
+	})
+}
+
+func testAccPinotTableConfig_minimal(name string) string {
+	return fmt.Sprintf(pinotProviderBlock+`
+resource "pinot_schema" "test" {
+  schema_name = "%[1]s"
+
+  schema = jsonencode({
+    schemaName = "%[1]s"
+
+    dimensionFieldSpecs = [
+      { name = "vhost", dataType = "STRING" }
+    ]
+
+    dateTimeFieldSpecs = [
+      {
+        name        = "timestamp"
+        dataType    = "LONG"
+        format      = "1:MILLISECONDS:EPOCH"
+        granularity = "1:MILLISECONDS"
+      }
+    ]
+  })
+}
+
+resource "pinot_table" "test" {
+  table_name = "%[1]s"
+  table_type = "OFFLINE"
+  depends_on = [pinot_schema.test]
+
+  table_config = jsonencode({
+    tableName = "%[1]s_OFFLINE"
+    tableType = "OFFLINE"
+
+    segmentsConfig = {
+      timeColumnName = "timestamp"
+      replication    = "1"
+    }
+
+    tenants = {
+      broker = "DefaultTenant"
+      server = "DefaultTenant"
+    }
+
+    # Only loadMode — the controller stamps ~15 other defaults here.
+    tableIndexConfig = {
+      loadMode = "MMAP"
+    }
+
+    # Explicit nulls the controller returns as null and would otherwise be
+    # stripped out of state, producing a "+ tierOverwrites = null" perma-diff.
+    fieldConfigList = [
+      { name = "timestamp", encodingType = "DICTIONARY", tierOverwrites = null },
+      { name = "vhost", encodingType = "DICTIONARY", tierOverwrites = null },
+    ]
+
+    metadata = {}
+  })
+}
+`, name)
 }
 
 // Common provider block so the provider is "explicitly configured".
