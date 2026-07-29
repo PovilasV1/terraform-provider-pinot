@@ -218,10 +218,15 @@ func (r *TableResource) Read(ctx context.Context, req resource.ReadRequest, resp
 
 	// Normalize and store the table configuration JSON.
 	// Remove sasl.jaas.config so we don't store the secret inside table_config,
-	// and strip null-valued keys the controller stamps onto unset fields
-	// (e.g. "indexes": null on field configs) which would otherwise perma-diff
-	// against user HCL that omits those keys.
-	cleanForState := stripNullValues(removeSaslJaasFromTableConfig(tableConfig))
+	// then reconcile the controller response against the shape the user manages
+	// (prior state). The controller stamps dozens of default fields onto every
+	// table it stores — non-null ones like tableIndexConfig.optimizeNoDictStats-
+	// Collection=false and null ones like fieldConfigList[*].tierOverwrites —
+	// none of which appear in the user's HCL. Reconciling to the prior-state
+	// shape drops those so they don't perma-diff, while keeping the user's keys
+	// (values pulled from the server) so genuine drift is still detected.
+	cleanServer := removeSaslJaasFromTableConfig(tableConfig)
+	cleanForState := reconcileTableStateShape(cleanServer, data.TableConfig.ValueString())
 	configJSON, err := json.Marshal(cleanForState)
 	if err != nil {
 		resp.Diagnostics.AddError(
