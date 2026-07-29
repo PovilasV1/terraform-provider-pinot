@@ -182,11 +182,13 @@ func (r *SchemaResource) Read(ctx context.Context, req resource.ReadRequest, res
 		return
 	}
 
-	// Pinot's GET response stamps `"indexes": null` (and other null-valued
+	// Pinot's GET response stamps defaults (e.g. `"indexes": null`, and other
 	// keys) onto field specs the user never wrote. Storing those into state
-	// produces a perma-diff against user HCL that omits the keys. Strip nulls
-	// so the state matches the user's representation.
-	schemaJSON, err := json.Marshal(stripNullValues(schema))
+	// produces a perma-diff against user HCL that omits the keys. Reconcile the
+	// response against the shape the user manages (prior state) so controller
+	// additions are dropped while drift on managed keys is still detected. On
+	// import (no prior shape) this falls back to the null-stripped response.
+	schemaJSON, err := json.Marshal(reconcileToPriorState(schema, data.Schema.ValueString()))
 	if err != nil {
 		resp.Diagnostics.AddError(
 			"Error Marshaling Schema",
